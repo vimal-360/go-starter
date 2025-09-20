@@ -1,0 +1,673 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Workflow UI (Vue) — Actions & Conditions</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+        body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin:0; background:#f4f6f8; color:#111; }
+        header { padding:12px 16px; background:#0f172a; color:#fff; display:flex; gap:12px; align-items:center; }
+        header h1 { margin:0; font-size:16px; font-weight:600; }
+        #app { display:flex; height:calc(100vh - 56px); }
+        .canvas { flex:1; position:relative; background:linear-gradient(180deg,#eef2ff 0%, #f8fafc 100%); overflow:auto; border-right:1px solid #e6eef8; }
+        .sidebar { width:420px; padding:12px; box-sizing:border-box; background:#fff; overflow:auto; }
+        .toolbar { padding:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+        .btn { background:#0b75ff; color:white; padding:8px 10px; border-radius:6px; cursor:pointer; border:none; font-weight:600; }
+        .btn.ghost { background:transparent; color:#0b75ff; border:1px solid #dbeafe; }
+        .node { position:absolute; min-width:160px; max-width:260px; background:white; border-radius:8px; box-shadow:0 6px 14px rgba(10,20,40,0.08); padding:8px; cursor:grab; user-select:none; }
+        .node.dragging { opacity:0.85; transform:scale(1.01); cursor:grabbing; }
+        .node .title { font-weight:700; margin-bottom:6px; font-size:13px; display:flex; justify-content:space-between; gap:8px; align-items:center; }
+        .node .body { font-size:13px; color:#333; }
+        .node small { color:#666; display:block; margin-top:6px; font-size:12px; }
+        .node .handles { display:flex; justify-content:space-between; gap:6px; margin-top:8px; }
+        .node .handle { background:#eef2ff;color:#0b57d0;padding:6px;border-radius:6px;font-size:11px; cursor:pointer; }
+        .edges { position:absolute; left:0; top:0; pointer-events:none; }
+        .controls { margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; }
+        textarea { width:100%; min-height:80px; font-family:monospace; font-size:13px; padding:8px; box-sizing:border-box; border-radius:6px; border:1px solid #e6eef8; }
+        label { display:block; margin-top:8px; font-size:13px; color:#333; margin-bottom:6px; }
+        .list { display:flex; gap:6px; flex-wrap:wrap; }
+        .chip { background:#eef2ff; color:#064e9b; padding:6px 8px; border-radius:6px; font-size:13px; }
+        .info { font-size:13px; color:#334155; margin-top:8px; }
+        .log { background:#0b1220; color:#e6f1ff; padding:8px; border-radius:6px; font-family:monospace; font-size:13px; max-height:220px; overflow:auto; }
+        .edge-label-input { width:100%; padding:6px; box-sizing:border-box; font-size:12px; margin-top:6px; border-radius:6px; border:1px solid #eef2ff; }
+        .small { font-size:12px; color:#475569; }
+    </style>
+    <script src="https://unpkg.com/vue@3.3.4/dist/vue.global.prod.js"></script>
+</head>
+<body>
+<header>
+    <h1>Workflow Builder — Actions & Conditions (Vue)</h1>
+    <div style="margin-left:auto; font-size:13px; opacity:0.9">Drag nodes • Connect • Simulate</div>
+</header>
+
+<div id="app">
+    <div class="canvas" ref="canvas" @mouseup="onMouseUp" @mousemove="onMouseMove" @mouseleave="onMouseUp">
+        <!-- SVG for edges -->
+        <svg class="edges" :width="svgSize.width" :height="svgSize.height" ref="svg">
+            <defs>
+                <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#0b57d0"/>
+                </marker>
+            </defs>
+
+            <g v-for="edge in edges" :key="edge.id">
+                <path :d="edgePath(edge)" stroke="#0b57d0" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+                <foreignObject :x="edgeLabelPos(edge).x - 60" :y="edgeLabelPos(edge).y - 18" width="120" height="24">
+                    <div xmlns="http://www.w3.org/1999/xhtml" style="font-size:12px; text-align:center;">
+                        <div style="background:rgba(11,87,255,0.08); color:#0b57d0; padding:2px 6px; border-radius:12px; display:inline-block;">
+                            {{ edge.label || 'next' }}
+                        </div>
+                    </div>
+                </foreignObject>
+            </g>
+
+            <!-- optional highlighted connection preview -->
+            <g v-if="connecting.from">
+                <path :d="previewPath" stroke="#0b57d0" stroke-dasharray="6 6" stroke-width="2" fill="none"/>
+            </g>
+        </svg>
+
+        <!-- Nodes -->
+        <div v-for="node in nodes" :key="node.id"
+             :class="['node', draggingNodeId===node.id ? 'dragging' : '']"
+             :style="{ left: node.x + 'px', top: node.y + 'px' }"
+             @mousedown.prevent="startDrag($event, node)"
+             @dblclick="openNodeEditor(node)">
+
+            <div class="title">
+                <div>{{ node.type }} • {{ node.name || node.id }}</div>
+                <div class="small">↺{{ node.restarts || 0 }}</div>
+            </div>
+
+            <div class="body">
+                <div v-if="node.type === 'Action'">
+                    <div><strong>{{ node.data?.label || 'Action' }}</strong></div>
+                    <small>{{ node.data?.desc || 'Executes an operation (simulated).' }}</small>
+                    <label class="small">Action code (JS expression, use context):</label>
+                    <textarea v-model="node.data.expr" rows="3" @mousedown.stop></textarea>
+                </div>
+
+                <div v-if="node.type === 'IfElse'">
+                    <div><strong>If / Else</strong></div>
+                    <small>Expression should return truthy/falsey</small>
+                    <label class="small">Expression:</label>
+                    <input class="edge-label-input" v-model="node.data.expr" @mousedown.stop />
+                </div>
+
+                <div v-if="node.type === 'Match'">
+                    <div><strong>Match (switch)</strong></div>
+                    <small>Expression evaluated and compared to case labels</small>
+                    <label class="small">Expression:</label>
+                    <input class="edge-label-input" v-model="node.data.expr" @mousedown.stop />
+                </div>
+
+                <div v-if="node.type === 'Loop'">
+                    <div><strong>Loop (forEach)</strong></div>
+                    <small>Iterates over array expression.</small>
+                    <label class="small">Array expression (e.g. context.items):</label>
+                    <input class="edge-label-input" v-model="node.data.expr" @mousedown.stop />
+                    <label class="small">Iterator var name:</label>
+                    <input class="edge-label-input" v-model="node.data.iterVar" @mousedown.stop />
+                    <label class="small">Max iterations:</label>
+                    <input class="edge-label-input" type="number" v-model.number="node.data.maxIter" @mousedown.stop />
+                </div>
+
+                <div v-if="node.type === 'Start'">
+                    <div><strong>Start</strong></div>
+                    <small>Entry node for the workflow.</small>
+                </div>
+
+                <div v-if="node.type === 'End'">
+                    <div><strong>End</strong></div>
+                    <small>Stops the workflow.</small>
+                </div>
+
+                <div class="handles">
+                    <div class="handle" @click.stop="beginConnect(node)">➤ out</div>
+                    <div class="handle" @click.stop="selectNode(node)">●</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <aside class="sidebar">
+        <div class="toolbar">
+            <button class="btn" @click="addNode('Start')">+ Start</button>
+            <button class="btn" @click="addNode('Action')">+ Action</button>
+            <button class="btn" @click="addNode('IfElse')">+ If/Else</button>
+            <button class="btn" @click="addNode('Match')">+ Match</button>
+            <button class="btn" @click="addNode('Loop')">+ Loop</button>
+            <button class="btn" @click="addNode('End')">+ End</button>
+            <button class="btn ghost" @click="resetScene">Reset</button>
+        </div>
+
+        <label>Selected node</label>
+        <div v-if="selectedNode" style="padding:8px; border:1px dashed #eef2ff; border-radius:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div><strong>{{selectedNode.type}} • {{selectedNode.id}}</strong></div>
+                <div>
+                    <button class="btn ghost" @click="deleteNode(selectedNode.id)">Delete</button>
+                </div>
+            </div>
+
+            <label>Name / Label</label>
+            <input v-model="selectedNode.name" @input="forceRerender" class="edge-label-input" />
+
+            <label class="small">Metadata</label>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                <div class="chip">id: {{ selectedNode.id }}</div>
+                <div class="chip">type: {{ selectedNode.type }}</div>
+            </div>
+
+            <div style="margin-top:8px;">
+                <label>Outgoing edges</label>
+                <div v-if="outgoing(selectedNode.id).length === 0" class="small">No outgoing edges. Create one by clicking an <em>out</em> handle on a node, then target node.</div>
+                <div v-for="edge in outgoing(selectedNode.id)" :key="edge.id" style="display:flex; gap:6px; align-items:center; margin-top:6px;">
+                    <input v-model="edge.label" class="edge-label-input" style="flex:1" />
+                    <button class="btn ghost" @click="removeEdge(edge.id)">Remove</button>
+                </div>
+            </div>
+        </div>
+
+        <div v-else style="padding:8px; color:#475569;">Select a node (click ● on a node) to edit its properties.</div>
+
+        <label style="margin-top:12px;">Controls</label>
+        <div class="controls">
+            <button class="btn" @click="exportJson">Export JSON</button>
+            <button class="btn" @click="importExample">Load Example</button>
+            <button class="btn" @click="simulate">Simulate</button>
+            <button class="btn ghost" @click="clearLogs">Clear Logs</button>
+        </div>
+
+        <label style="margin-top:12px;">Test context (JSON)</label>
+        <textarea v-model="testContextStr" rows="6"></textarea>
+
+        <label style="margin-top:8px;">Logs / Simulation output</label>
+        <div class="log" ref="logBox">
+            <div v-for="(l,i) in logs" :key="i" v-html="l"></div>
+        </div>
+
+        <label style="margin-top:8px;">Workflow JSON</label>
+        <textarea readonly :value="workflowJson" rows="8"></textarea>
+
+        <div class="info">
+            <div><strong>How to connect</strong></div>
+            <div class="small" style="margin-top:6px;">1) Click <em>out</em> on a source node. 2) Click any node's ● to target. 3) For conditions, set edge label to <em>true</em>/<em>false</em> or case label.</div>
+            <div class="small" style="margin-top:6px;">Loop node: set array expression (e.g. <code>context.items</code>) and iterator var name (default <code>item</code>).</div>
+        </div>
+    </aside>
+</div>
+
+<script>
+    const { createApp, reactive, ref, onMounted, computed, nextTick } = Vue;
+
+    createApp({
+        setup() {
+            const nodes = reactive([]);
+            const edges = reactive([]);
+            const selectedNode = ref(null);
+            const draggingNodeId = ref(null);
+            const dragOffset = ref({x:0,y:0});
+            const canvas = ref(null);
+            const svg = ref(null);
+            const svgSize = reactive({width:2000, height:1600});
+            const logs = reactive([]);
+            const testContextStr = ref(JSON.stringify({ user:{ age:20, email:'you@example.com' }, items: [1,2,3], payload: { foo: 'bar' } }, null, 2));
+            const connecting = reactive({ from: null, startPos: null, toPos: null });
+            const idCounter = ref(1);
+
+            function makeId(pref='n') { return pref + (idCounter.value++); }
+
+            function addNode(type) {
+                const id = makeId('n');
+                const base = {
+                    id,
+                    type,
+                    name: type === 'Action' ? 'Action' : type,
+                    x: 60 + Math.random()*300,
+                    y: 40 + Math.random()*300,
+                    restarts: 0,
+                    data: {}
+                };
+
+                if (type === 'Action') {
+                    base.data = { expr: "/* example: context.count = (context.count||0)+1; return {ok:true, note:'action ran'} */" , label:'Action' };
+                } else if (type === 'IfElse') {
+                    base.data = { expr: "context.user.age >= 18" };
+                } else if (type === 'Match') {
+                    base.data = { expr: "context.key" };
+                } else if (type === 'Loop') {
+                    base.data = { expr: "context.items", iterVar: "item", maxIter: 100 };
+                } else if (type === 'Start' || type === 'End') {
+                    base.data = {};
+                }
+
+                nodes.push(base);
+                selectNode(base);
+            }
+
+            function selectNode(node) {
+                selectedNode.value = node;
+            }
+
+            function startDrag(e, node) {
+                draggingNodeId.value = node.id;
+                dragOffset.value = { x: e.clientX - node.x, y: e.clientY - node.y };
+                window.getSelection().removeAllRanges();
+            }
+
+            function onMouseMove(e) {
+                if (draggingNodeId.value) {
+                    const node = nodes.find(n => n.id === draggingNodeId.value);
+                    if (!node) return;
+                    // compute relative to canvas
+                    const rect = canvas.value.getBoundingClientRect();
+                    node.x = Math.max(0, e.clientX - rect.left - dragOffset.value.x);
+                    node.y = Math.max(0, e.clientY - rect.top - dragOffset.value.y);
+                    forceRerender();
+                } else if (connecting.from) {
+                    const rect = canvas.value.getBoundingClientRect();
+                    connecting.toPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+                }
+            }
+
+            function onMouseUp(e) {
+                if (draggingNodeId.value) {
+                    draggingNodeId.value = null;
+                }
+                // if connecting, clicking on a node's select button should call selectNodeTarget
+            }
+
+            function openNodeEditor(node) {
+                selectNode(node);
+            }
+
+            function beginConnect(node) {
+                connecting.from = node.id;
+                const rect = canvas.value.getBoundingClientRect();
+                connecting.startPos = { x: node.x + 140, y: node.y + 18 }; // approx out handle pos
+                connecting.toPos = { x: connecting.startPos.x + 40, y: connecting.startPos.y + 20 };
+            }
+
+            function selectNodeAsTarget(node) {
+                if (!connecting.from) { selectNode(node); return; }
+                if (connecting.from === node.id) {
+                    // ignore connecting to self
+                    connecting.from = null;
+                    return;
+                }
+                // create edge
+                const eid = makeId('e');
+                edges.push({ id: eid, source: connecting.from, target: node.id, label: '' });
+                connecting.from = null;
+                selectNode(node);
+            }
+
+            function selectNode(node) {
+                // custom: clicking the small ● calls this — we should check if connecting
+                if (connecting.from) {
+                    selectNodeAsTarget(node);
+                    return;
+                }
+                selectedNode.value = node;
+            }
+
+            // expose small helper for click on node's ●
+            function nodeClick(node) {
+                selectNode(node);
+            }
+
+            function outgoing(nodeId) {
+                return edges.filter(e => e.source === nodeId);
+            }
+
+            function removeEdge(eid) {
+                const idx = edges.findIndex(e => e.id === eid);
+                if (idx>=0) edges.splice(idx,1);
+            }
+
+            function deleteNode(nodeId) {
+                const idx = nodes.findIndex(n => n.id === nodeId);
+                if (idx>=0) nodes.splice(idx,1);
+                // remove edges referencing node
+                for (let i = edges.length-1; i>=0; --i) {
+                    if (edges[i].source === nodeId || edges[i].target === nodeId) edges.splice(i,1);
+                }
+                if (selectedNode.value?.id === nodeId) selectedNode.value = null;
+            }
+
+            function resetScene() {
+                nodes.splice(0, nodes.length);
+                edges.splice(0, edges.length);
+                idCounter.value = 1;
+                logs.splice(0, logs.length);
+                selectedNode.value = null;
+            }
+
+            function edgePath(edge) {
+                const s = nodes.find(n => n.id === edge.source);
+                const t = nodes.find(n => n.id === edge.target);
+                if (!s || !t) return '';
+                const sx = s.x + 150; // out
+                const sy = s.y + 24;
+                const tx = t.x + 8; // in
+                const ty = t.y + 24;
+                const dx = Math.abs(tx - sx);
+                const c1x = sx + Math.max(30, dx/2);
+                const c1y = sy;
+                const c2x = tx - Math.max(30, dx/2);
+                const c2y = ty;
+                return `M ${sx} ${sy} C ${c1x} ${c1y} ${c2x} ${c2y} ${tx} ${ty}`;
+            }
+
+            function edgeLabelPos(edge) {
+                const s = nodes.find(n => n.id === edge.source);
+                const t = nodes.find(n => n.id === edge.target);
+                if (!s || !t) return {x:0,y:0};
+                return { x: (s.x + t.x)/2 + 80, y: (s.y + t.y)/2 + 18 };
+            }
+
+            const previewPath = computed(() => {
+                if (!connecting.from || !connecting.startPos || !connecting.toPos) return '';
+                const sx = connecting.startPos.x;
+                const sy = connecting.startPos.y;
+                const tx = connecting.toPos.x;
+                const ty = connecting.toPos.y;
+                const dx = Math.abs(tx - sx);
+                const c1x = sx + Math.max(30, dx/2);
+                const c1y = sy;
+                const c2x = tx - Math.max(30, dx/2);
+                const c2y = ty;
+                return `M ${sx} ${sy} C ${c1x} ${c1y} ${c2x} ${c2y} ${tx} ${ty}`;
+            });
+
+            function forceRerender() {
+                // reactive arrays handle it; small no-op
+                idCounter.value = idCounter.value;
+            }
+
+            function exportJson() {
+                const j = workflowJson;
+                navigator.clipboard?.writeText(j).then(()=>log('Workflow JSON copied to clipboard.'));
+            }
+
+            const workflowJson = computed(() => {
+                return JSON.stringify({
+                    nodes: nodes.map(n => ({
+                        id: n.id, type: n.type, name: n.name, x: n.x, y: n.y, data: n.data
+                    })),
+                    edges: edges.map(e => ({ id:e.id, source:e.source, target:e.target, label:e.label }))
+                }, null, 2);
+            });
+
+            function importExample() {
+                resetScene();
+                // create a small example
+                addNode('Start'); // n1
+                addNode('Action'); // n2
+                addNode('IfElse'); // n3
+                addNode('Action'); // n4 true path
+                addNode('Action'); // n5 false path
+                addNode('Loop'); // n6
+                addNode('End'); // n7
+
+                // tweak expressions and positions nextTick
+                nextTick(()=> {
+                    const [n1,n2,n3,n4,n5,n6,n7] = nodes.slice(0,7);
+                    n1.x=40;n1.y=40;
+                    n2.x=200;n2.y=40; n2.data.expr = "context.payload.count = (context.payload.count||0)+1; return {ok:true, note:'increment'}";
+                    n3.x=400;n3.y=40; n3.data.expr = "context.user.age >= 18";
+                    n4.x=600;n4.y=10; n4.data.expr = "return {ok:true, note:'adult path'}";
+                    n5.x=600;n5.y=90; n5.data.expr = "return {ok:true, note:'minor path'}";
+                    n6.x=200;n6.y=200; n6.data.expr = "context.items"; n6.data.iterVar = "it"; n6.data.maxIter=50;
+                    n7.x=420;n7.y=260;
+                    edges.push({ id: makeId('e'), source:n1.id, target:n2.id, label:''});
+                    edges.push({ id: makeId('e'), source:n2.id, target:n3.id, label:''});
+                    edges.push({ id: makeId('e'), source:n3.id, target:n4.id, label:'true'});
+                    edges.push({ id: makeId('e'), source:n3.id, target:n5.id, label:'false'});
+                    edges.push({ id: makeId('e'), source:n5.id, target:n6.id, label:''});
+                    edges.push({ id: makeId('e'), source:n4.id, target:n7.id, label:''});
+                    edges.push({ id: makeId('e'), source:n6.id, target:n7.id, label:''});
+                });
+            }
+
+            function log(msg) {
+                logs.unshift(`[${new Date().toLocaleTimeString()}] ${escapeHtml(msg)}`);
+                // cap
+                if (logs.length > 500) logs.splice(500);
+                nextTick(()=> {
+                    const box = document.querySelector('.log');
+                    if (box) box.scrollTop = 0;
+                });
+            }
+
+            function clearLogs() {
+                logs.splice(0, logs.length);
+            }
+
+            function escapeHtml(s) {
+                return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+            }
+
+            // Simple executor
+            async function simulate() {
+                clearLogs();
+                log('Simulation started');
+                let context;
+                try {
+                    context = JSON.parse(testContextStr.value);
+                } catch (e) {
+                    log('Invalid context JSON: ' + e.message);
+                    return;
+                }
+
+                // build node map and edges map
+                const nodeMap = {};
+                nodes.forEach(n => nodeMap[n.id] = JSON.parse(JSON.stringify(n)));
+                const outMap = {};
+                edges.forEach(e => { outMap[e.source] = outMap[e.source] || []; outMap[e.source].push(e); });
+
+                // find Start
+                const starts = nodes.filter(n => n.type === 'Start');
+                if (starts.length === 0) {
+                    log('No Start node found. Add a Start node.');
+                    return;
+                }
+                let current = starts[0].id;
+                const visited = new Set();
+                let steps = 0;
+                const maxSteps = 2000;
+
+                while (current) {
+                    steps++;
+                    if (steps > maxSteps) { log('Max steps reached. Possible infinite loop. Stopping.'); break; }
+                    const node = nodeMap[current];
+                    if (!node) { log('Node not found: ' + current); break; }
+
+                    log(`Visiting node ${node.id} (${node.type})`);
+                    if (node.type === 'End') {
+                        log('Reached End node. Stopping.');
+                        break;
+                    } else if (node.type === 'Action') {
+                        // execute action expression in a safe sandbox-like Function
+                        try {
+                            const fn = new Function('context', node.data?.expr || '');
+                            const result = fn(context);
+                            log('Action result: ' + JSON.stringify(result));
+                        } catch (e) {
+                            log('Action error: ' + e.message);
+                        }
+                        // go to next outgoing (first)
+                        const outs = outMap[current] || [];
+                        current = outs[0]?.target || null;
+                    } else if (node.type === 'IfElse') {
+                        let val = false;
+                        try {
+                            const fn = new Function('context', 'return !!(' + (node.data?.expr || 'false') + ');');
+                            val = fn(context);
+                        } catch (e) {
+                            log('IfElse eval error: ' + e.message);
+                        }
+                        // choose outgoing with label 'true' or 'false'
+                        const outs = outMap[current] || [];
+                        const chosen = outs.find(o => (String(o.label||'').toLowerCase()) === String(val).toLowerCase()) || outs[0];
+                        log(`IfElse -> ${val} -> ${chosen ? chosen.target : 'no-edge'}`);
+                        current = chosen?.target || null;
+                    } else if (node.type === 'Match') {
+                        let key;
+                        try {
+                            const fn = new Function('context', 'return (' + (node.data?.expr || 'null') + ');');
+                            key = fn(context);
+                        } catch (e) {
+                            log('Match eval error: ' + e.message);
+                        }
+                        const outs = outMap[current] || [];
+                        // find outgoing with label === key
+                        const chosen = outs.find(o => String(o.label) === String(key)) || outs.find(o => (o.label||'').toLowerCase()==='default') || outs[0];
+                        log(`Match -> key=${String(key)} -> ${chosen ? chosen.target : 'no-edge'}`);
+                        current = chosen?.target || null;
+                    } else if (node.type === 'Loop') {
+                        // Evaluate array
+                        let arr = [];
+                        try {
+                            const fn = new Function('context', 'return (' + (node.data?.expr || '[]') + ');');
+                            arr = fn(context) || [];
+                            if (!Array.isArray(arr)) arr = [];
+                        } catch (e) {
+                            log('Loop eval error: ' + e.message);
+                            arr = [];
+                        }
+                        const iterVar = node.data?.iterVar || 'item';
+                        const maxIter = Math.max(1, Number(node.data?.maxIter || 1000));
+                        let iterations = 0;
+                        // find loop body outgoing (first)
+                        const outs = outMap[current] || [];
+                        const bodyEdge = outs[0];
+                        if (!bodyEdge) {
+                            log('Loop has no body outgoing edge, skipping.');
+                            current = outs[1]?.target || null;
+                            continue;
+                        }
+                        // For each element, set context[iterVar] and execute the body path until it returns to after the loop node.
+                        for (let i=0;i<arr.length;i++) {
+                            if (iterations >= maxIter) { log('Loop maxIter reached. Breaking loop.'); break; }
+                            iterations++;
+                            context[iterVar] = arr[i];
+                            log(`Loop iteration ${i} (${iterVar}=${JSON.stringify(arr[i])})`);
+                            // execute the body starting from bodyEdge.target until we hit the Loop node again or End or run out
+                            let innerCurrent = bodyEdge.target;
+                            let innerSteps = 0;
+                            const innerMax = 500;
+                            while (innerCurrent && innerCurrent !== current && innerSteps < innerMax) {
+                                innerSteps++;
+                                const innerNode = nodeMap[innerCurrent];
+                                if (!innerNode) { log('Inner node missing: '+innerCurrent); break; }
+                                log(`  [inner] Visiting ${innerNode.id} (${innerNode.type})`);
+                                if (innerNode.type === 'Action') {
+                                    try {
+                                        const fn = new Function('context', innerNode.data?.expr || '');
+                                        const res = fn(context);
+                                        log('  [inner] Action result: ' + JSON.stringify(res));
+                                    } catch (e) {
+                                        log('  [inner] Action error: ' + e.message);
+                                    }
+                                    const innerOut = (outMap[innerCurrent] || [])[0];
+                                    innerCurrent = innerOut?.target || null;
+                                } else if (innerNode.type === 'IfElse') {
+                                    let val=false;
+                                    try {
+                                        const fn = new Function('context', 'return !!(' + (innerNode.data?.expr || 'false') + ');');
+                                        val = fn(context);
+                                    } catch (e) {
+                                        log('  [inner] IfElse eval error: ' + e.message);
+                                    }
+                                    const chosen = (outMap[innerCurrent] || []).find(o => String(o.label).toLowerCase() === String(val).toLowerCase()) || (outMap[innerCurrent]||[])[0];
+                                    innerCurrent = chosen?.target || null;
+                                } else {
+                                    // For simplicity execute action-like for other nodes too
+                                    const innerOut = (outMap[innerCurrent] || [])[0];
+                                    innerCurrent = innerOut?.target || null;
+                                }
+                            } // inner while
+                            if (innerSteps >= innerMax) {
+                                log('Inner max steps reached. Breaking loop execution.');
+                                break;
+                            }
+                        } // for each
+                        // after loop finished, continue to the next outgoing after the loop node excluding the body
+                        // choose edge that is not bodyEdge if exists
+                        let nextEdge = outs.find(o => o !== bodyEdge) || bodyEdge;
+                        current = nextEdge?.target || null;
+                    } else if (node.type === 'Start') {
+                        const outs = outMap[current] || [];
+                        current = outs[0]?.target || null;
+                    } else {
+                        // default: go to first outgoing
+                        const outs = outMap[current] || [];
+                        current = outs[0]?.target || null;
+                    }
+
+                    // safety: visited count
+                    const visitKey = current;
+                    if (visitKey) {
+                        if (!visited.has(visitKey)) visited.add(visitKey);
+                        if (visited.size > 500) {
+                            log('Visited node limit reached. Stopping.');
+                            break;
+                        }
+                    }
+                } // main while
+                log('Simulation finished. Final context: ' + JSON.stringify(context));
+            }
+
+            onMounted(()=> {
+                canvas.value = document.querySelector('.canvas');
+                svg.value = document.querySelector('.edges');
+                svgSize.width = Math.max(1200, canvas.value.clientWidth + 800);
+                svgSize.height = Math.max(900, canvas.value.clientHeight + 800);
+
+                // click handlers: clicking on node's dot should pass through
+                document.addEventListener('click', (ev) => {
+                    // nothing global for now
+                });
+
+                // Allow clicking node ● to work: intercept target
+                canvas.value.addEventListener('click', (ev) => {
+                    const el = ev.target;
+                    // find node element parent
+                    const nodeEl = el.closest && el.closest('.node');
+                    if (nodeEl) {
+                        // get node id by matching nodes positions (approx)
+                        const rect = canvas.value.getBoundingClientRect();
+                        const nx = parseFloat(nodeEl.style.left);
+                        const ny = parseFloat(nodeEl.style.top);
+                        const found = nodes.find(n => Math.abs(n.x - nx) < 5 && Math.abs(n.y - ny) < 5);
+                        if (found) {
+                            // if clicked on small dot or clicked on node, detect inner target
+                            const inner = ev.target;
+                            // if clicked on "●" (we used .handle second button), select or connect
+                            if (inner && inner.classList && inner.classList.contains('handle') && inner.textContent.trim()==='●') {
+                                selectNode(found);
+                            } else {
+                                // if not, maybe user clicked somewhere; do nothing
+                            }
+                        }
+                    }
+                });
+
+                // double-click on any node title already handled via @dblclick on node
+            });
+
+            // small helper to compute index
+            return {
+                nodes, edges, addNode, selectNode, selectedNode, deleteNode, outgoing, removeEdge,
+                draggingNodeId, startDrag, onMouseMove, onMouseUp, canvas, svg, svgSize,
+                edgePath, edgeLabelPos, beginConnect, connecting, previewPath, forceRerender,
+                exportJson, workflowJson, logs, testContextStr, simulate, clearLogs, importExample,
+                resetScene, selectNodeAsTarget, nodeClick
+            };
+        }
+    }).mount('#app');
+</script>
+</body>
+</html>
